@@ -42,6 +42,11 @@ public:
     virtual void recalculateSize();
 
 protected:
+    LRESULT wndProc(UINT msg, WPARAM wp, LPARAM lp) override;
+    int scale(int logicalPixels) const {
+        return ::MulDiv(logicalPixels, dpi_, 96);
+    }
+    void updateFontForDpi();
     void onLButtonDown(WPARAM wp, LPARAM lp);
     void onLButtonUp(WPARAM wp, LPARAM lp);
     void onMouseMove(WPARAM wp, LPARAM lp);
@@ -50,6 +55,9 @@ protected:
     TextService* textService_;
     POINTS oldPos;
     HFONT font_;
+    HFONT baseFont_;
+    HFONT dpiFont_;
+    UINT dpi_;
     int margin_;
 };
 

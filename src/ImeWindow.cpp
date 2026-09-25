@@ -19,10 +19,36 @@
 
 #include "ImeWindow.h"
 
+#ifndef WM_DPICHANGED
+#define WM_DPICHANGED 0x02E0
+#endif
+
 namespace Ime {
 
+static UINT getWindowDpi(HWND hwnd) {
+    typedef UINT (WINAPI* GetDpiForWindowFn)(HWND);
+    static GetDpiForWindowFn getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(
+        ::GetProcAddress(::GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+    if (getDpiForWindow) {
+        UINT dpi = getDpiForWindow(hwnd);
+        if (dpi)
+            return dpi;
+    }
+
+    HDC dc = ::GetDC(hwnd);
+    if (!dc)
+        return 96;
+    UINT dpi = static_cast<UINT>(::GetDeviceCaps(dc, LOGPIXELSY));
+    ::ReleaseDC(hwnd, dc);
+    return dpi ? dpi : 96;
+}
+
 ImeWindow::ImeWindow(TextService* service):
-    textService_(service) {
+    textService_(service),
+    font_(NULL),
+    baseFont_(NULL),
+    dpiFont_(NULL),
+    dpi_(96) {
 
     if(service->isImmersive()) { // windows 8 app mode
         margin_ = 10;
@@ -31,7 +57,8 @@ ImeWindow::ImeWindow(TextService* service):
         margin_ = 5;
     }
 
-    font_ = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    baseFont_ = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    font_ = baseFont_;
 /*
     LOGFONT lf;
     GetObject(font_, sizeof(lf), &lf);
@@ -42,6 +69,8 @@ ImeWindow::ImeWindow(TextService* service):
 }
 
 ImeWindow::~ImeWindow(void) {
+    if (dpiFont_)
+        ::DeleteObject(dpiFont_);
 }
 
 void ImeWindow::onLButtonDown(WPARAM wp, LPARAM lp) {
@@ -87,12 +116,59 @@ void ImeWindow::move(int x, int y) {
 }
 
 void ImeWindow::setFont(HFONT f) {
-    if(font_)
-        ::DeleteObject(font_);
-    font_ = f;
+    baseFont_ = f ? f : (HFONT)::GetStockObject(DEFAULT_GUI_FONT);
+    dpi_ = getWindowDpi(hwnd_);
+    updateFontForDpi();
     recalculateSize();
     if(isVisible())
         ::InvalidateRect(hwnd_, NULL, TRUE);
+}
+
+void ImeWindow::updateFontForDpi() {
+    if (dpiFont_) {
+        ::DeleteObject(dpiFont_);
+        dpiFont_ = NULL;
+    }
+    font_ = baseFont_;
+    if (!baseFont_)
+        return;
+
+    HDC dc = ::GetDC(NULL);
+    UINT baseDpi = dc ? static_cast<UINT>(::GetDeviceCaps(dc, LOGPIXELSY)) : 96;
+    if (dc)
+        ::ReleaseDC(NULL, dc);
+    if (baseDpi == 0)
+        baseDpi = 96;
+    if (dpi_ == baseDpi)
+        return;
+
+    LOGFONTW fontInfo = {};
+    if (::GetObjectW(baseFont_, sizeof(fontInfo), &fontInfo) != sizeof(fontInfo))
+        return;
+    fontInfo.lfHeight = ::MulDiv(fontInfo.lfHeight, dpi_, baseDpi);
+    dpiFont_ = ::CreateFontIndirectW(&fontInfo);
+    if (dpiFont_)
+        font_ = dpiFont_;
+}
+
+LRESULT ImeWindow::wndProc(UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_DPICHANGED) {
+        UINT newDpi = HIWORD(wp);
+        if (newDpi)
+            dpi_ = newDpi;
+        updateFontForDpi();
+
+        const RECT* suggestedRect = reinterpret_cast<const RECT*>(lp);
+        if (suggestedRect) {
+            ::SetWindowPos(hwnd_, NULL, suggestedRect->left, suggestedRect->top,
+                suggestedRect->right - suggestedRect->left, suggestedRect->bottom - suggestedRect->top,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        recalculateSize();
+        ::InvalidateRect(hwnd_, NULL, TRUE);
+        return 0;
+    }
+    return Window::wndProc(msg, wp, lp);
 }
 
 // virtual

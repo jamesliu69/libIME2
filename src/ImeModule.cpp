@@ -20,11 +20,11 @@
 #include "ImeModule.h"
 #include <string>
 #include <algorithm>
-#include <memory>
 #include <ObjBase.h>
 #include <msctf.h>
 #include <Shlwapi.h>
 #include <ShlObj.h>
+#include <UserEnv.h>
 #include <assert.h>
 #include <VersionHelpers.h>  // Provided by Windows SDK >= 8.1
 
@@ -83,38 +83,91 @@ HRESULT ImeModule::getClassObject(REFCLSID rclsid, REFIID riid, void **ppvObj) {
 }
 
 #ifndef _WIN64  // only do this for the 32-bit version dll
-static void loadDefaultUserRegistry(const wchar_t* defaultUserRegKey) {
-    // The registry settings of all newly created users are based on the content of 
-    // "C:\Users\Default User\ntuser.dat", so we need to write our settings to this file so 
-    // the HKEY_CURRENT_USER key of newly created users can also contain our settings.
-    // In order to do this, we need to load the default "hive" to registry first.
-    // Reference: https://msdn.microsoft.com/zh-tw/library/windows/desktop/ms724889(v=vs.85).aspx
-    wchar_t *userProfilesDir = nullptr;
-    if (SUCCEEDED(::SHGetKnownFolderPath(FOLDERID_UserProfiles, 0, NULL, &userProfilesDir))) {
-        // get the path of the default ntuser.dat file
-        std::wstring defaultRegFile = userProfilesDir;
-        ::CoTaskMemFree(userProfilesDir);
-        defaultRegFile += L"\\Default User\\ntuser.dat";
-
-        // loading registry file requires special privileges SE_RESTORE_NAME and SE_BACKUP_NAME.
-        // So let's do privilege elevation for our process.
-        HANDLE processToken = NULL;
-        ::OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &processToken);
-        DWORD bufLen = sizeof(TOKEN_PRIVILEGES) + sizeof(LUID_AND_ATTRIBUTES);
-        std::unique_ptr<char> buf(new char[bufLen]);
-        TOKEN_PRIVILEGES* privileges = reinterpret_cast<TOKEN_PRIVILEGES*>(buf.get());
-        privileges->PrivilegeCount = 2;
-        ::LookupPrivilegeValue(NULL, SE_RESTORE_NAME, &privileges->Privileges[0].Luid);
-        privileges->Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-        ::LookupPrivilegeValue(NULL, SE_BACKUP_NAME, &privileges->Privileges[1].Luid);
-        privileges->Privileges[1].Attributes = SE_PRIVILEGE_ENABLED;
-        ::AdjustTokenPrivileges(processToken, FALSE, privileges, bufLen, NULL, NULL);
-        ::CloseHandle(processToken);
-
-        // load the default registry hive under the specified key name
-        ::RegLoadKeyW(HKEY_USERS, defaultUserRegKey, defaultRegFile.c_str());
+class DefaultUserRegistry {
+public:
+    DefaultUserRegistry():
+        token_(NULL),
+        privilegesChanged_(false),
+        previousPrivilegesSize_(0),
+        mounted_(false) {
     }
-}
+
+    ~DefaultUserRegistry() {
+        unload();
+        if (privilegesChanged_)
+            ::AdjustTokenPrivileges(token_, FALSE, reinterpret_cast<PTOKEN_PRIVILEGES>(&previousPrivileges_), previousPrivilegesSize_, NULL, NULL);
+        if (token_)
+            ::CloseHandle(token_);
+    }
+
+    bool load() {
+        if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token_))
+            return false;
+
+        PrivilegeList requested = {}, previous = {};
+        requested.count = 2;
+        if (!::LookupPrivilegeValueW(NULL, SE_RESTORE_NAME, &requested.privileges[0].Luid) ||
+            !::LookupPrivilegeValueW(NULL, SE_BACKUP_NAME, &requested.privileges[1].Luid))
+            return false;
+        requested.privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        requested.privileges[1].Attributes = SE_PRIVILEGE_ENABLED;
+        previousPrivilegesSize_ = sizeof(previous);
+        ::SetLastError(ERROR_SUCCESS);
+        if (!::AdjustTokenPrivileges(token_, FALSE, reinterpret_cast<PTOKEN_PRIVILEGES>(&requested), sizeof(requested),
+            reinterpret_cast<PTOKEN_PRIVILEGES>(&previous), &previousPrivilegesSize_))
+            return false;
+        previousPrivileges_ = previous;
+        privilegesChanged_ = true;
+        if (::GetLastError() == ERROR_NOT_ALL_ASSIGNED)
+            return false;
+
+        DWORD profileDirSize = 0;
+        ::SetLastError(ERROR_SUCCESS);
+        if (::GetDefaultUserProfileDirectoryW(NULL, &profileDirSize) ||
+            ::GetLastError() != ERROR_INSUFFICIENT_BUFFER || profileDirSize == 0)
+            return false;
+        std::vector<wchar_t> profileDir(profileDirSize);
+        if (!::GetDefaultUserProfileDirectoryW(profileDir.data(), &profileDirSize))
+            return false;
+        std::wstring defaultRegFile(profileDir.data());
+        defaultRegFile += L"\\NTUSER.DAT";
+
+        GUID guid;
+        if (FAILED(::CoCreateGuid(&guid)))
+            return false;
+        wchar_t guidText[40];
+        if (!::StringFromGUID2(guid, guidText, _countof(guidText)))
+            return false;
+        registryKey_ = L"PIME_Default_User_";
+        registryKey_ += guidText;
+        if (::RegLoadKeyW(HKEY_USERS, registryKey_.c_str(), defaultRegFile.c_str()) != ERROR_SUCCESS)
+            return false;
+        mounted_ = true;
+        return true;
+    }
+
+    bool unload() {
+        if (!mounted_)
+            return true;
+        if (::RegUnLoadKeyW(HKEY_USERS, registryKey_.c_str()) != ERROR_SUCCESS)
+            return false;
+        mounted_ = false;
+        return true;
+    }
+
+private:
+    struct PrivilegeList {
+        DWORD count;
+        LUID_AND_ATTRIBUTES privileges[2];
+    };
+
+    HANDLE token_;
+    PrivilegeList previousPrivileges_ = {};
+    bool privilegesChanged_;
+    DWORD previousPrivilegesSize_;
+    bool mounted_;
+    std::wstring registryKey_;
+};
 #endif  // #ifndef _WIN64
 
 HRESULT ImeModule::registerLangProfiles(LangProfileInfo* langs, int langsCount) {
@@ -165,15 +218,15 @@ HRESULT ImeModule::registerLangProfiles(LangProfileInfo* langs, int langsCount) 
     // are not affected by WOW64 redirection. So doing this inside the 32-bit version is enough.
 
     if (::IsWindows8OrGreater()) {
+        DefaultUserRegistry defaultUserRegistry;
+        if (!defaultUserRegistry.load())
+            return E_FAIL;
         DWORD sidCount = 0;
         if (::RegQueryInfoKeyW(HKEY_USERS, NULL, NULL, NULL, &sidCount, NULL, NULL, NULL, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
             return E_FAIL;
         wchar_t* textServiceClsIdStr = nullptr;
         if (FAILED(::StringFromCLSID(textServiceClsid_, &textServiceClsIdStr)))
             return E_FAIL;
-
-        const wchar_t* defaultUserRegKey = L"__PIME_Default_user__";
-        loadDefaultUserRegistry(defaultUserRegKey);
 
         // write the language settings to user-specific registry.
         wchar_t sid[256];
@@ -214,10 +267,10 @@ HRESULT ImeModule::registerLangProfiles(LangProfileInfo* langs, int langsCount) 
                 }
             }
         }
+        bool unloaded = defaultUserRegistry.unload();
         ::CoTaskMemFree(textServiceClsIdStr);
-
-        // unload the default user registry hive
-        ::RegUnLoadKeyW(HKEY_USERS, defaultUserRegKey);
+        if (!unloaded)
+            return E_FAIL;
     }
 #endif  // #ifndef _WIN64
     return S_OK;
@@ -356,15 +409,15 @@ HRESULT ImeModule::unregisterServer() {
 
     // delete settings under "HKEY_CURRENT_USER\Control Panel\International\User Profile\<locale_name>" for all users
     if (::IsWindows8OrGreater()) {
+        DefaultUserRegistry defaultUserRegistry;
+        if (!defaultUserRegistry.load())
+            return E_FAIL;
         DWORD sidCount = 0;
         if (::RegQueryInfoKeyW(HKEY_USERS, NULL, NULL, NULL, &sidCount, NULL, NULL, NULL, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
             return E_FAIL;
         wchar_t* textServiceClsIdStr = nullptr;
         if (FAILED(::StringFromCLSID(textServiceClsid_, &textServiceClsIdStr)))
             return E_FAIL;
-
-        const wchar_t* defaultUserRegKey = L"__PIME_Default_user__";
-        loadDefaultUserRegistry(defaultUserRegKey);
 
         // delete the language settings from user-specific registry.
         wchar_t sid[256];
@@ -411,10 +464,10 @@ HRESULT ImeModule::unregisterServer() {
                 }
             }
         }
+        bool unloaded = defaultUserRegistry.unload();
         ::CoTaskMemFree(textServiceClsIdStr);
-
-        // unload the default user registry hive
-        ::RegUnLoadKeyW(HKEY_USERS, defaultUserRegKey);
+        if (!unloaded)
+            return E_FAIL;
     }
 #endif // #ifndef _WIN64
     return S_OK;

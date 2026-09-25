@@ -43,7 +43,7 @@ void MessageWindow::recalculateSize() {
     ReleaseDC(hwnd_, dc);
 
     SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0,
-        size.cx + margin_ * 2, size.cy + margin_ * 2, SWP_NOACTIVATE|SWP_NOMOVE);
+        size.cx + scale(margin_) * 2, size.cy + scale(margin_) * 2, SWP_NOACTIVATE|SWP_NOMOVE);
 }
 
 void MessageWindow::setText(std::wstring text) {
@@ -85,7 +85,7 @@ void MessageWindow::onPaint(PAINTSTRUCT& ps) {
     if(isImmersive()) {
         SetTextColor(hDC, GetSysColor(COLOR_WINDOWTEXT));
         SetBkColor(hDC, GetSysColor(COLOR_WINDOW));
-        HPEN pen = ::CreatePen(PS_SOLID, 3, RGB(0, 0, 0));
+        HPEN pen = ::CreatePen(PS_SOLID, scale(3), RGB(0, 0, 0));
         HGDIOBJ oldPen = ::SelectObject(hDC, pen);
         ::Rectangle(hDC, rc.left, rc.top, rc.right, rc.bottom);
         ::SelectObject(hDC, oldPen);

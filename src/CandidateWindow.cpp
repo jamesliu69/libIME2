@@ -180,7 +180,7 @@ LRESULT CandidateWindow::wndProc(UINT msg, WPARAM wp , LPARAM lp) {
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
         default:
-            return Window::wndProc(msg, wp, lp);
+            return ImeWindow::wndProc(msg, wp, lp);
     }
     return 0;
 }
@@ -204,7 +204,7 @@ void CandidateWindow::onPaint(WPARAM wp, LPARAM lp) {
     // draw a flat black border in Windows 8 app immersive mode
     // draw a 3d border in desktop mode
     if(isImmersive()) {
-        HPEN pen = ::CreatePen(PS_SOLID, 3, RGB(0, 0, 0));
+        HPEN pen = ::CreatePen(PS_SOLID, scale(3), RGB(0, 0, 0));
         HGDIOBJ oldPen = ::SelectObject(hDC, pen);
         ::Rectangle(hDC, rc.left, rc.top, rc.right, rc.bottom);
         ::SelectObject(hDC, oldPen);
@@ -218,17 +218,20 @@ void CandidateWindow::onPaint(WPARAM wp, LPARAM lp) {
 
     // paint items
     int col = 0;
-    int x = margin_, y = margin_;
+    int margin = scale(margin_);
+    int rowSpacing = scale(rowSpacing_);
+    int colSpacing = scale(colSpacing_);
+    int x = margin, y = margin;
     for(int i = 0, n = items_.size(); i < n; ++i) {
         paintItem(hDC, i, x, y);
         ++col; // go to next column
         if(col >= candPerRow_) {
             col = 0;
-            x = margin_;
-            y += itemHeight_ + rowSpacing_;
+            x = margin;
+            y += itemHeight_ + rowSpacing;
         }
         else {
-            x += colSpacing_ + selKeyWidth_ + textWidth_;
+            x += colSpacing + selKeyWidth_ + textWidth_;
         }
     }
     SelectObject(hDC, oldFont);
@@ -237,7 +240,9 @@ void CandidateWindow::onPaint(WPARAM wp, LPARAM lp) {
 
 void CandidateWindow::recalculateSize() {
     if(items_.empty()) {
-        resize(margin_ * 2, margin_ * 2);
+        int margin = scale(margin_);
+        resize(margin * 2, margin * 2);
+        return;
     }
 
     HDC hDC = ::GetWindowDC(hwnd());
@@ -274,18 +279,18 @@ void CandidateWindow::recalculateSize() {
 
     if(items_.size() <= candPerRow_) {
         width = items_.size() * (selKeyWidth_ + textWidth_);
-        width += colSpacing_ * (items_.size() - 1);
-        width += margin_ * 2;
-        height = itemHeight_ + margin_ * 2;
+        width += scale(colSpacing_) * (items_.size() - 1);
+        width += scale(margin_) * 2;
+        height = itemHeight_ + scale(margin_) * 2;
     }
     else {
         width = candPerRow_ * (selKeyWidth_ + textWidth_);
-        width += colSpacing_ * (candPerRow_ - 1);
-        width += margin_ * 2;
+        width += scale(colSpacing_) * (candPerRow_ - 1);
+        width += scale(margin_) * 2;
         int rowCount = items_.size() / candPerRow_;
         if(items_.size() % candPerRow_)
             ++rowCount;
-        height = itemHeight_ * rowCount + rowSpacing_ * (rowCount - 1) + margin_ * 2;
+        height = itemHeight_ * rowCount + scale(rowSpacing_) * (rowCount - 1) + scale(margin_) * 2;
     }
     resize(width, height);
 }
@@ -391,8 +396,8 @@ void CandidateWindow::itemRect(int i, RECT& rect) {
     int row, col;
     row = i / candPerRow_;
     col = i % candPerRow_;
-    rect.left = margin_ + col * (selKeyWidth_ + textWidth_ + colSpacing_);
-    rect.top = margin_ + row * (itemHeight_ + rowSpacing_);
+    rect.left = scale(margin_) + col * (selKeyWidth_ + textWidth_ + scale(colSpacing_));
+    rect.top = scale(margin_) + row * (itemHeight_ + scale(rowSpacing_));
     rect.right = rect.left + (selKeyWidth_ + textWidth_);
     rect.bottom = rect.top + itemHeight_;
 }
