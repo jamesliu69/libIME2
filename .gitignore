@@ -1,0 +1,12 @@
+.DS_Store
+Thumbs.db
+Desktop.ini
+__pycache__/
+*.py[cod]
+.vs/
+*.user
+*.suo
+/build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
